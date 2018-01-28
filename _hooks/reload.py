@@ -3,18 +3,55 @@ import argparse
 import logging
 import subprocess
 import toml
-
+import time
 import os
+import signal
 from http import HTTPStatus
+from multiprocessing import Process
 
 import sys
 from traceback import print_exc
+
+import socket
+from socketserver import TCPServer, StreamRequestHandler
+from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs
 
 DEBUG = '--debug' in sys.argv
 
 logger = logging.getLogger('selfhosted-docs')
 hooks_dir = os.path.dirname(os.path.abspath(__file__))
 projects_dir = os.path.dirname(hooks_dir)
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        params = parse_qs(self.path[2:])
+        params = {key: value[0] for key, value in params.items()}
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write("{}".format(params).encode('utf-8'))
+        try:
+            process_request(**params)
+        except Exception as e:
+            self.wfile.write('Exception: {}'.format(e).encode('utf-8') + b"\r\n")
+            sys.exit(0)
+        self.wfile.write(b"<html><head><title>Finish.</title></head>")
+        # sys.exit(0)
+
+
+class Server(TCPServer):
+    # The constant would be better initialized by a systemd module
+    SYSTEMD_FIRST_SOCKET_FD = 3
+
+    def __init__(self, server_address, handler_cls):
+        # Invoke base but omit bind/listen steps (performed by systemd activation!)
+        TCPServer.__init__(
+            self, server_address, handler_cls, bind_and_activate=False)
+        # Override socket
+        self.socket = socket.fromfd(
+            self.SYSTEMD_FIRST_SOCKET_FD, self.address_family, self.socket_type)
 
 
 def print_status_code(status: HTTPStatus):
@@ -39,7 +76,7 @@ class SelfhostedDocsException(Exception):
     status = HTTPStatus.INTERNAL_SERVER_ERROR
     message = ''
 
-    def __init__(self, status: HTTPStatus=None, message: str=None):
+    def __init__(self, status: HTTPStatus = None, message: str = None):
         self.status = status or self.status
         self.message = message or self.message
 
@@ -50,7 +87,7 @@ class SelfhostedDocsException(Exception):
 
 
 class OriginalException(SelfhostedDocsException):
-    def __init__(self, exception: Exception, status: HTTPStatus=None):
+    def __init__(self, exception: Exception, status: HTTPStatus = None):
         self.status = status or self.status
         self.exception = exception
 
@@ -104,24 +141,44 @@ def reload(project_name: str):
         check_execution_success(['git', 'pull'], repo_directory)
     if not os.path.lexists(venv_directory):
         check_execution_success(['virtualenv', '.venv'], repo_directory)
-    execute_venv(['pip', 'install', '-r', 'py3-requirements.txt'], repo_directory, venv_directory)
-    execute_venv(['pip', 'install', '-r', 'requirements-dev.txt'], repo_directory, venv_directory)
-    execute_venv(['make', 'html'], docs_directory, venv_directory)
+    try:
+        execute_venv(['pip', 'install', '-r', 'py3-requirements.txt'], repo_directory, venv_directory)
+        execute_venv(['pip', 'install', '-r', 'requirements-dev.txt'], repo_directory, venv_directory)
+        execute_venv(['make', 'html'], docs_directory, venv_directory)
+    except Exception as e:
+        print(e)
+    os.kill(os.getppid(), signal.SIGTERM)
 
 
-def cgi_management():
+def cgi_management(**arguments):
     import cgi
     print("Content-Type: text/html")
-    arguments = cgi.FieldStorage()
-    repo_name = arguments.getfirst('repo_name')
-    key = arguments.getfirst('key')
+    repo_name = arguments.get('repo_name')
+    key = arguments.get('key')
     if not repo_name:
         raise MissingParameterException('repo_name')
     if not key:
         raise MissingParameterException('key')
     if key != settings.key:
         raise InvalidKeyException()
-    os.system('nohup {}/reload.py reload \'{}\'&'.format(hooks_dir, repo_name))
+    print("")
+    print("Starting...")
+    os.system('{}/reload.py reload \'{}\'&'.format(hooks_dir, repo_name))
+    print("Success")
+    # sys.exit(0)
+
+
+def process_request(**arguments):
+    repo_name = arguments.get('repo_name')
+    key = arguments.get('key')
+    if not repo_name:
+        raise MissingParameterException('repo_name')
+    if not key:
+        raise MissingParameterException('key')
+    if key != settings.key:
+        raise InvalidKeyException()
+    p = Process(target=reload, args=(repo_name,))
+    p.start()
 
 
 def cgi_start():
@@ -142,7 +199,10 @@ settings = Settings()
 
 def execute_args(args):
     if not getattr(args, 'which', None) or args.which == 'cgi_start':
-        cgi_start()
+        logging.basicConfig(level=logging.INFO)
+        HOST, PORT = "localhost", 9997  # not really needed here
+        server = Server((HOST, PORT), Handler)
+        server.serve_forever()
     elif args.which == 'reload':
         reload(args.project_name)
 

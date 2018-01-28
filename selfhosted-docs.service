@@ -1,0 +1,13 @@
+[Unit]
+Description=Selfhosted Docs Service
+After=network.target selfhosted-docs.socket
+Requires=selfhosted-docs.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python /srv/http/docs/_hooks/reload.py
+user=http
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target
