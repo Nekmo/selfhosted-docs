@@ -138,6 +138,8 @@ def reload(project_name: str):
     if not os.path.lexists(repo_directory):
         check_execution_success(['git', 'clone', settings.get_project(project_name)['url']], projects_dir)
     else:
+        check_execution_success(['git', 'config', '--global', 'user.email', 'docs@nekmo.org'], repo_directory)
+        check_execution_success(['git', 'config', '--global', 'user.name', 'Nekmo docs'], repo_directory)
         check_execution_success(['git', 'pull'], repo_directory)
     if not os.path.lexists(venv_directory):
         check_execution_success(['virtualenv', '.venv'], repo_directory)
